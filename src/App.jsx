@@ -1,9 +1,15 @@
 import React from "react";
 import "./App.css";
+import { supabase, isSupabaseConfigured, STORAGE_BUCKET } from "./lib/supabaseClient";
 
 const VIEWS = {
   projects: "projects",
   library: "library",
+};
+
+const AUTH_MODES = {
+  signUp: "signup",
+  signIn: "signin",
 };
 
 const STORAGE_KEY = "simple-audio-library";
@@ -18,16 +24,42 @@ const GRADIENTS = [
   "linear-gradient(135deg, #ffcfe4, #b0f3ff)",
 ];
 
-const generateId = () =>
-  (typeof crypto !== "undefined" && crypto.randomUUID)
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const generateId = () => {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  const template = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx";
+  return template.replace(/[xy]/g, (char) => {
+    const randomValue = Math.floor(Math.random() * 16);
+    const value = char === "x" ? randomValue : (randomValue & 0x3) | 0x8;
+    return value.toString(16);
+  });
+};
+
+const ensureTrackShape = (track) => ({
+  ...track,
+  title: track.title || "Untitled track",
+  fileUrl: track.fileUrl || track.file_url || "",
+  storagePath: track.storagePath || track.storage_path || null,
+  fileSize:
+    typeof track.fileSize === "number"
+      ? track.fileSize
+      : typeof track.file_size === "number"
+        ? track.file_size
+        : 0,
+  duration: Number.isFinite(Number(track.duration)) ? Number(track.duration) : 0,
+  createdAt: track.createdAt || track.created_at || new Date().toISOString(),
+});
 
 const ensureProjectShape = (project, index) => ({
   ...project,
   owner: project.owner || DEFAULT_OWNER_NAME,
-  coverGradient: project.coverGradient || GRADIENTS[index % GRADIENTS.length],
-  tracks: Array.isArray(project.tracks) ? project.tracks : [],
+  coverGradient:
+    project.coverGradient ||
+    project.cover_gradient ||
+    GRADIENTS[index % GRADIENTS.length],
+  createdAt: project.createdAt || project.created_at || new Date().toISOString(),
+  tracks: Array.isArray(project.tracks) ? project.tracks.map(ensureTrackShape) : [],
 });
 
 const formatDuration = (seconds) => {
@@ -196,7 +228,14 @@ export default function App() {
   const [accountName, setAccountName] = React.useState("");
   const [accountEmail, setAccountEmail] = React.useState("");
   const [accountError, setAccountError] = React.useState("");
+  const [isSavingAccount, setIsSavingAccount] = React.useState(false);
+  const [projectError, setProjectError] = React.useState("");
+  const [isProjectSyncing, setIsProjectSyncing] = React.useState(false);
+  const [isLoadingRemote, setIsLoadingRemote] = React.useState(false);
+  const [authMode, setAuthMode] = React.useState(AUTH_MODES.signUp);
   const fileInputRef = React.useRef(null);
+  const isCloudSyncEnabled = Boolean(supabase);
+  const isSignInMode = authMode === AUTH_MODES.signIn;
   const [user, setUser] = React.useState(() => {
     if (typeof window === "undefined") return null;
     try {
@@ -248,10 +287,107 @@ export default function App() {
     ? selectedProject.tracks.reduce((sum, track) => sum + (track.duration || 0), 0)
     : 0;
 
-  const handleCreateProject = (event) => {
+  const loadProjectsFromSupabase = React.useCallback(async () => {
+    if (!isCloudSyncEnabled || !supabase || !user) return;
+    setIsLoadingRemote(true);
+    try {
+      const { data, error } = await supabase
+        .from("projects")
+        .select(
+          `
+          id,
+          name,
+          owner,
+          cover_gradient,
+          created_at,
+          tracks (
+            id,
+            title,
+            file_url,
+            storage_path,
+            file_size,
+            duration,
+            created_at
+          )
+        `
+        )
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: true });
+      if (error) throw error;
+      const normalised = (data || []).map((project, index) =>
+        ensureProjectShape(
+          {
+            ...project,
+            coverGradient: project.cover_gradient,
+            createdAt: project.created_at,
+            tracks: (project.tracks || []).map((track) => ({
+              ...track,
+              fileUrl: track.file_url,
+              storagePath: track.storage_path,
+              fileSize: track.file_size,
+              duration: track.duration,
+              createdAt: track.created_at,
+            })),
+          },
+          index
+        )
+      );
+      setProjects(normalised);
+      setProjectError("");
+    } catch (error) {
+      console.error(error);
+      setProjectError("Unable to sync with Supabase. Showing local data.");
+    } finally {
+      setIsLoadingRemote(false);
+    }
+  }, [isCloudSyncEnabled, user]);
+
+  React.useEffect(() => {
+    if (!user || !isCloudSyncEnabled) return;
+    loadProjectsFromSupabase();
+  }, [user, isCloudSyncEnabled, loadProjectsFromSupabase]);
+
+  const handleCreateProject = async (event) => {
     event.preventDefault();
     const name = newProjectName.trim();
     if (!name) return;
+    setProjectError("");
+
+    if (isCloudSyncEnabled && supabase && user) {
+      setIsProjectSyncing(true);
+      try {
+        const gradient = GRADIENTS[projects.length % GRADIENTS.length];
+        const { data, error } = await supabase
+          .from("projects")
+          .insert({
+            name,
+            owner: user.name,
+            user_id: user.id,
+            cover_gradient: gradient,
+            created_at: new Date().toISOString(),
+          })
+          .select("id,name,owner,cover_gradient,created_at")
+          .single();
+        if (error) throw error;
+        const project = ensureProjectShape(
+          {
+            ...data,
+            coverGradient: data.cover_gradient,
+            createdAt: data.created_at,
+            tracks: [],
+          },
+          projects.length
+        );
+        setProjects((prev) => [...prev, project]);
+        setNewProjectName("");
+      } catch (error) {
+        console.error(error);
+        setProjectError("Unable to create project right now. Try again soon.");
+      } finally {
+        setIsProjectSyncing(false);
+      }
+      return;
+    }
 
     const project = {
       id: generateId(),
@@ -266,7 +402,7 @@ export default function App() {
     setNewProjectName("");
   };
 
-  const handleDeleteProject = (projectId) => {
+  const handleDeleteProject = async (projectId) => {
     if (!window.confirm("Delete this project and its tracks?")) return;
 
     const projectToDelete = projects.find((project) => project.id === projectId);
@@ -276,6 +412,25 @@ export default function App() {
           URL.revokeObjectURL(track.fileUrl);
         }
       });
+    }
+
+    if (isCloudSyncEnabled && supabase && user) {
+      setProjectError("");
+      try {
+        const storagePaths =
+          projectToDelete?.tracks
+            .map((track) => track.storagePath)
+            .filter(Boolean) || [];
+        if (storagePaths.length > 0) {
+          await supabase.storage.from(STORAGE_BUCKET).remove(storagePaths);
+        }
+        const { error } = await supabase.from("projects").delete().eq("id", projectId);
+        if (error) throw error;
+      } catch (error) {
+        console.error(error);
+        setProjectError("Unable to delete project from Supabase. Try again.");
+        return;
+      }
     }
 
     setProjects((prev) => prev.filter((project) => project.id !== projectId));
@@ -301,6 +456,31 @@ export default function App() {
     setUploadError("");
     setIsProcessingTrack(false);
   };
+
+  const uploadTrackFileToSupabase = React.useCallback(
+    async (file, projectId) => {
+      if (!supabase || !user) {
+        throw new Error("Supabase is not configured.");
+      }
+      const extension = file.name.split(".").pop();
+      const filename = `${generateId()}${extension ? `.${extension}` : ""}`;
+      const storagePath = `${user.id}/${projectId}/${filename}`;
+      const { error: uploadErrorResponse } = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .upload(storagePath, file, {
+          cacheControl: "3600",
+          upsert: true,
+          contentType: file.type || "audio/mpeg",
+        });
+      if (uploadErrorResponse) throw uploadErrorResponse;
+      const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(storagePath);
+      if (!data?.publicUrl) {
+        throw new Error("Unable to resolve a public URL for the uploaded track.");
+      }
+      return { storagePath, publicUrl: data.publicUrl };
+    },
+    [user]
+  );
 
   const handleAddTrackClick = () => {
     if (!selectedProjectId) {
@@ -330,23 +510,69 @@ export default function App() {
       }
 
       const duration = await readAudioDuration(fileUrl);
+      const finalTitle = titlePrompt.trim() || defaultTitle;
 
-      const track = {
-        id: generateId(),
-        title: titlePrompt.trim() || defaultTitle,
-        fileUrl,
-        fileSize: file.size,
-        createdAt: new Date().toISOString(),
-        duration,
-      };
+      if (isCloudSyncEnabled && supabase && user) {
+        try {
+          const { storagePath, publicUrl } = await uploadTrackFileToSupabase(
+            file,
+            selectedProjectId
+          );
+          const { data, error } = await supabase
+            .from("tracks")
+            .insert({
+              title: finalTitle,
+              project_id: selectedProjectId,
+              file_url: publicUrl,
+              storage_path: storagePath,
+              file_size: file.size,
+              duration,
+              created_at: new Date().toISOString(),
+            })
+            .select(
+              "id,title,file_url,storage_path,file_size,duration,created_at"
+            )
+            .single();
+          if (error) throw error;
+          const track = ensureTrackShape({
+            ...data,
+            fileUrl: data.file_url,
+            storagePath: data.storage_path,
+            fileSize: data.file_size,
+            createdAt: data.created_at,
+          });
+          setProjects((prev) =>
+            prev.map((project) =>
+              project.id === selectedProjectId
+                ? { ...project, tracks: [...project.tracks, track] }
+                : project
+            )
+          );
+        } catch (error) {
+          console.error(error);
+          setUploadError("Upload failed. Check your Supabase settings and try again.");
+        } finally {
+          URL.revokeObjectURL(fileUrl);
+        }
+      } else {
+        const track = {
+          id: generateId(),
+          title: finalTitle,
+          fileUrl,
+          storagePath: null,
+          fileSize: file.size,
+          createdAt: new Date().toISOString(),
+          duration,
+        };
 
-      setProjects((prev) =>
-        prev.map((project) =>
-          project.id === selectedProjectId
-            ? { ...project, tracks: [...project.tracks, track] }
-            : project
-        )
-      );
+        setProjects((prev) =>
+          prev.map((project) =>
+            project.id === selectedProjectId
+              ? { ...project, tracks: [...project.tracks, track] }
+              : project
+          )
+        );
+      }
     } catch (error) {
       console.error(error);
       URL.revokeObjectURL(fileUrl);
@@ -356,13 +582,28 @@ export default function App() {
     }
   };
 
-  const handleDeleteTrack = (projectId, trackId) => {
+  const handleDeleteTrack = async (projectId, trackId) => {
     if (!window.confirm("Delete this track?")) return;
 
     const project = projects.find((item) => item.id === projectId);
     const track = project?.tracks.find((item) => item.id === trackId);
     if (track?.fileUrl?.startsWith("blob:")) {
       URL.revokeObjectURL(track.fileUrl);
+    }
+
+    if (isCloudSyncEnabled && supabase) {
+      setUploadError("");
+      try {
+        if (track?.storagePath) {
+          await supabase.storage.from(STORAGE_BUCKET).remove([track.storagePath]);
+        }
+        const { error } = await supabase.from("tracks").delete().eq("id", trackId);
+        if (error) throw error;
+      } catch (error) {
+        console.error(error);
+        setUploadError("Unable to delete the track from Supabase right now.");
+        return;
+      }
     }
 
     setProjects((prev) =>
@@ -377,15 +618,16 @@ export default function App() {
     );
   };
 
-  const handleAccountSubmit = (event) => {
+  const handleAccountSubmit = async (event) => {
     event.preventDefault();
     const trimmedName = accountName.trim();
     const trimmedEmail = accountEmail.trim().toLowerCase();
-    if (!trimmedName) {
+    const isValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
+
+    if (!isSignInMode && !trimmedName) {
       setAccountError("Add your name to continue.");
       return;
     }
-    const isValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
     if (!isValidEmail) {
       setAccountError("Enter a valid email address.");
       return;
@@ -394,25 +636,88 @@ export default function App() {
       !trimmedEmail.endsWith("@gmail.com") &&
       !trimmedEmail.endsWith("@googlemail.com")
     ) {
-      setAccountError("Use a Google (Gmail) email address to create an account.");
+      setAccountError("Use a Google (Gmail) email address to continue.");
       return;
     }
-    setUser({
-      id: generateId(),
-      name: trimmedName,
-      email: trimmedEmail,
-    });
-    setAccountName("");
-    setAccountEmail("");
+    if (isSignInMode && (!isCloudSyncEnabled || !supabase)) {
+      setAccountError("Connect Supabase to enable account sign in.");
+      return;
+    }
+
+    setIsSavingAccount(true);
     setAccountError("");
+
+    try {
+      if (isSignInMode && supabase) {
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("id,name,email")
+          .eq("email", trimmedEmail)
+          .maybeSingle();
+        if (error) throw error;
+        if (!data) {
+          setAccountError("We couldn't find an account with that email.");
+          return;
+        }
+        setUser({
+          id: data.id,
+          name: data.name,
+          email: data.email,
+        });
+        setAccountName("");
+        setAccountEmail("");
+        return;
+      }
+
+      if (isCloudSyncEnabled && supabase) {
+        const profilePayload = {
+          id: user?.id || generateId(),
+          name: trimmedName,
+          email: trimmedEmail,
+        };
+        const { data, error } = await supabase
+          .from("profiles")
+          .upsert(profilePayload, { onConflict: "email" })
+          .select("id,name,email")
+          .single();
+        if (error) throw error;
+        setUser({
+          id: data.id,
+          name: data.name,
+          email: data.email,
+        });
+      } else {
+        setUser({
+          id: generateId(),
+          name: trimmedName,
+          email: trimmedEmail,
+        });
+      }
+      setAccountName("");
+      setAccountEmail("");
+    } catch (error) {
+      console.error(error);
+      setAccountError(
+        isSignInMode
+          ? "We couldn't sign you in. Double-check your Supabase keys."
+          : "We couldn't save your profile. Check your Supabase keys."
+      );
+    } finally {
+      setIsSavingAccount(false);
+    }
   };
 
   const handleSignOut = () => {
     setUser(null);
+    setProjects([]);
     setCurrentView(VIEWS.projects);
     setSelectedProjectId(null);
     setUploadError("");
     setIsProcessingTrack(false);
+    setAccountName("");
+    setAccountEmail("");
+    setAccountError("");
+    setAuthMode(AUTH_MODES.signIn);
   };
 
   if (!user) {
@@ -426,22 +731,28 @@ export default function App() {
         <main className="app-content">
           <section className="account-view">
             <div className="account-panel">
-              <p className="account-eyebrow">Welcome</p>
-              <h1>Create your account</h1>
+              <p className="account-eyebrow">
+                {isSignInMode ? "Welcome back" : "Welcome"}
+              </p>
+              <h1>{isSignInMode ? "Sign in to your library" : "Create your account"}</h1>
               <p className="account-copy">
-                Use your Google email to keep your mixtapes synced on this device.
+                {isSignInMode
+                  ? "Enter your Google email to load the projects and tracks you've saved."
+                  : "Use your Google email to keep your mixtapes synced locally (and in Supabase if connected)."}
               </p>
               <form className="account-form" onSubmit={handleAccountSubmit}>
-                <label className="account-field">
-                  <span>Name</span>
-                  <input
-                    type="text"
-                    value={accountName}
-                    onChange={(event) => setAccountName(event.target.value)}
-                    placeholder="Taylor Creator"
-                    autoComplete="name"
-                  />
-                </label>
+                {!isSignInMode && (
+                  <label className="account-field">
+                    <span>Name</span>
+                    <input
+                      type="text"
+                      value={accountName}
+                      onChange={(event) => setAccountName(event.target.value)}
+                      placeholder="Taylor Creator"
+                      autoComplete="name"
+                    />
+                  </label>
+                )}
                 <label className="account-field">
                   <span>Google email</span>
                   <input
@@ -453,12 +764,40 @@ export default function App() {
                   />
                 </label>
                 {accountError && <p className="status error">{accountError}</p>}
-                <button type="submit" className="account-submit">
-                  Create account
+                <button type="submit" className="account-submit" disabled={isSavingAccount}>
+                  {isSavingAccount
+                    ? isSignInMode
+                      ? "Signing in..."
+                      : "Creating..."
+                    : isSignInMode
+                      ? "Sign in"
+                      : "Create account"}
                 </button>
               </form>
+              <div className="account-toggle">
+                <span>
+                  {isSignInMode
+                    ? "Need an account?"
+                    : "Already have an account?"}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode(
+                      isSignInMode ? AUTH_MODES.signUp : AUTH_MODES.signIn
+                    );
+                    setAccountError("");
+                  }}
+                >
+                  {isSignInMode ? "Create one" : "Sign in"}
+                </button>
+              </div>
               <p className="account-hint">
-                Tip: use the Gmail address tied to your Google account. You can switch later.
+                {isCloudSyncEnabled
+                  ? isSignInMode
+                    ? "Sign in to pull your saved projects from Supabase on any device."
+                    : "Create your profile once, then sign in later to sync everything from Supabase."
+                  : "Supabase isn't connected yet, so data stays on this browser until you add env keys."}
               </p>
             </div>
           </section>
@@ -544,11 +883,21 @@ export default function App() {
                 onChange={(event) => setNewProjectName(event.target.value)}
                 placeholder="Project name"
               />
-              <button type="submit" className="create-project__button">
+              <button
+                type="submit"
+                className="create-project__button"
+                disabled={isProjectSyncing}
+              >
                 <PlusIcon />
-                <span>Add</span>
+                <span>{isProjectSyncing ? "Saving..." : "Add"}</span>
               </button>
             </form>
+            {isCloudSyncEnabled && !projectError && (
+              <p className="status info">
+                {isLoadingRemote ? "Syncing with Supabase..." : "Supabase sync active"}
+              </p>
+            )}
+            {projectError && <p className="status error">{projectError}</p>}
           </section>
         )}
 
