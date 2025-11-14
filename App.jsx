@@ -7,6 +7,11 @@ const VIEWS = {
   library: "library",
 };
 
+const AUTH_MODES = {
+  signUp: "signup",
+  signIn: "signin",
+};
+
 const STORAGE_KEY = "simple-audio-library";
 const USER_STORAGE_KEY = "simple-audio-user";
 const DEFAULT_OWNER_NAME = "Youfoundmikey";
@@ -19,10 +24,17 @@ const GRADIENTS = [
   "linear-gradient(135deg, #ffcfe4, #b0f3ff)",
 ];
 
-const generateId = () =>
-  (typeof crypto !== "undefined" && crypto.randomUUID)
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const generateId = () => {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  const template = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx";
+  return template.replace(/[xy]/g, (char) => {
+    const randomValue = Math.floor(Math.random() * 16);
+    const value = char === "x" ? randomValue : (randomValue & 0x3) | 0x8;
+    return value.toString(16);
+  });
+};
 
 const ensureTrackShape = (track) => ({
   ...track,
@@ -220,8 +232,10 @@ export default function App() {
   const [projectError, setProjectError] = React.useState("");
   const [isProjectSyncing, setIsProjectSyncing] = React.useState(false);
   const [isLoadingRemote, setIsLoadingRemote] = React.useState(false);
+  const [authMode, setAuthMode] = React.useState(AUTH_MODES.signUp);
   const fileInputRef = React.useRef(null);
   const isCloudSyncEnabled = Boolean(supabase);
+  const isSignInMode = authMode === AUTH_MODES.signIn;
   const [user, setUser] = React.useState(() => {
     if (typeof window === "undefined") return null;
     try {
@@ -608,11 +622,12 @@ export default function App() {
     event.preventDefault();
     const trimmedName = accountName.trim();
     const trimmedEmail = accountEmail.trim().toLowerCase();
-    if (!trimmedName) {
+    const isValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
+
+    if (!isSignInMode && !trimmedName) {
       setAccountError("Add your name to continue.");
       return;
     }
-    const isValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
     if (!isValidEmail) {
       setAccountError("Enter a valid email address.");
       return;
@@ -621,7 +636,11 @@ export default function App() {
       !trimmedEmail.endsWith("@gmail.com") &&
       !trimmedEmail.endsWith("@googlemail.com")
     ) {
-      setAccountError("Use a Google (Gmail) email address to create an account.");
+      setAccountError("Use a Google (Gmail) email address to continue.");
+      return;
+    }
+    if (isSignInMode && (!isCloudSyncEnabled || !supabase)) {
+      setAccountError("Connect Supabase to enable account sign in.");
       return;
     }
 
@@ -629,17 +648,36 @@ export default function App() {
     setAccountError("");
 
     try {
-      if (isCloudSyncEnabled && supabase) {
+      if (isSignInMode && supabase) {
         const { data, error } = await supabase
           .from("profiles")
-          .upsert(
-            {
-              id: user?.id,
-              name: trimmedName,
-              email: trimmedEmail,
-            },
-            { onConflict: "email" }
-          )
+          .select("id,name,email")
+          .eq("email", trimmedEmail)
+          .maybeSingle();
+        if (error) throw error;
+        if (!data) {
+          setAccountError("We couldn't find an account with that email.");
+          return;
+        }
+        setUser({
+          id: data.id,
+          name: data.name,
+          email: data.email,
+        });
+        setAccountName("");
+        setAccountEmail("");
+        return;
+      }
+
+      if (isCloudSyncEnabled && supabase) {
+        const profilePayload = {
+          id: user?.id || generateId(),
+          name: trimmedName,
+          email: trimmedEmail,
+        };
+        const { data, error } = await supabase
+          .from("profiles")
+          .upsert(profilePayload, { onConflict: "email" })
           .select("id,name,email")
           .single();
         if (error) throw error;
@@ -659,7 +697,11 @@ export default function App() {
       setAccountEmail("");
     } catch (error) {
       console.error(error);
-      setAccountError("We couldn't save your profile. Check your Supabase keys.");
+      setAccountError(
+        isSignInMode
+          ? "We couldn't sign you in. Double-check your Supabase keys."
+          : "We couldn't save your profile. Check your Supabase keys."
+      );
     } finally {
       setIsSavingAccount(false);
     }
@@ -672,6 +714,10 @@ export default function App() {
     setSelectedProjectId(null);
     setUploadError("");
     setIsProcessingTrack(false);
+    setAccountName("");
+    setAccountEmail("");
+    setAccountError("");
+    setAuthMode(AUTH_MODES.signIn);
   };
 
   if (!user) {
@@ -685,23 +731,28 @@ export default function App() {
         <main className="app-content">
           <section className="account-view">
             <div className="account-panel">
-              <p className="account-eyebrow">Welcome</p>
-              <h1>Create your account</h1>
+              <p className="account-eyebrow">
+                {isSignInMode ? "Welcome back" : "Welcome"}
+              </p>
+              <h1>{isSignInMode ? "Sign in to your library" : "Create your account"}</h1>
               <p className="account-copy">
-                Use your Google email to keep your mixtapes synced locally (and in Supabase
-                if connected).
+                {isSignInMode
+                  ? "Enter your Google email to load the projects and tracks you've saved."
+                  : "Use your Google email to keep your mixtapes synced locally (and in Supabase if connected)."}
               </p>
               <form className="account-form" onSubmit={handleAccountSubmit}>
-                <label className="account-field">
-                  <span>Name</span>
-                  <input
-                    type="text"
-                    value={accountName}
-                    onChange={(event) => setAccountName(event.target.value)}
-                    placeholder="Taylor Creator"
-                    autoComplete="name"
-                  />
-                </label>
+                {!isSignInMode && (
+                  <label className="account-field">
+                    <span>Name</span>
+                    <input
+                      type="text"
+                      value={accountName}
+                      onChange={(event) => setAccountName(event.target.value)}
+                      placeholder="Taylor Creator"
+                      autoComplete="name"
+                    />
+                  </label>
+                )}
                 <label className="account-field">
                   <span>Google email</span>
                   <input
@@ -714,12 +765,38 @@ export default function App() {
                 </label>
                 {accountError && <p className="status error">{accountError}</p>}
                 <button type="submit" className="account-submit" disabled={isSavingAccount}>
-                  {isSavingAccount ? "Creating..." : "Create account"}
+                  {isSavingAccount
+                    ? isSignInMode
+                      ? "Signing in..."
+                      : "Creating..."
+                    : isSignInMode
+                      ? "Sign in"
+                      : "Create account"}
                 </button>
               </form>
+              <div className="account-toggle">
+                <span>
+                  {isSignInMode
+                    ? "Need an account?"
+                    : "Already have an account?"}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode(
+                      isSignInMode ? AUTH_MODES.signUp : AUTH_MODES.signIn
+                    );
+                    setAccountError("");
+                  }}
+                >
+                  {isSignInMode ? "Create one" : "Sign in"}
+                </button>
+              </div>
               <p className="account-hint">
                 {isCloudSyncEnabled
-                  ? "Tracks will sync across devices via Supabase once you're signed in."
+                  ? isSignInMode
+                    ? "Sign in to pull your saved projects from Supabase on any device."
+                    : "Create your profile once, then sign in later to sync everything from Supabase."
                   : "Supabase isn't connected yet, so data stays on this browser until you add env keys."}
               </p>
             </div>
