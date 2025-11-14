@@ -1,4 +1,4 @@
-# Mixtape Planner
+# [Untitled] Clone
 
 A lightweight React + Vite starter that lets you experiment with project and track organisation right in the browser.  
 There is no backend and no third‑party SDKs — everything lives in local state so newcomers can explore the code without distractions.
