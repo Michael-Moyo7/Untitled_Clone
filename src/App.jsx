@@ -7,7 +7,8 @@ const VIEWS = {
 };
 
 const STORAGE_KEY = "simple-audio-library";
-const OWNER_NAME = "Youfoundmikey";
+const USER_STORAGE_KEY = "simple-audio-user";
+const DEFAULT_OWNER_NAME = "Youfoundmikey";
 const GRADIENTS = [
   "linear-gradient(135deg, #5b7cfa, #9c4df4)",
   "linear-gradient(135deg, #ff6a88, #ff99ac)",
@@ -24,7 +25,7 @@ const generateId = () =>
 
 const ensureProjectShape = (project, index) => ({
   ...project,
-  owner: project.owner || OWNER_NAME,
+  owner: project.owner || DEFAULT_OWNER_NAME,
   coverGradient: project.coverGradient || GRADIENTS[index % GRADIENTS.length],
   tracks: Array.isArray(project.tracks) ? project.tracks : [],
 });
@@ -166,18 +167,6 @@ const BellIcon = () => (
   </svg>
 );
 
-const UserIcon = () => (
-  <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
-    <path
-      d="M12 13a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm0 2c-4 0-7 2-7 5h14c0-3-3-5-7-5Z"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  </svg>
-);
-
 const PlusIcon = () => (
   <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
     <path
@@ -190,13 +179,37 @@ const PlusIcon = () => (
   </svg>
 );
 
+const getInitials = (value = "") =>
+  value
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || "")
+    .join("") || "U";
+
 export default function App() {
   const [currentView, setCurrentView] = React.useState(VIEWS.projects);
   const [newProjectName, setNewProjectName] = React.useState("");
   const [selectedProjectId, setSelectedProjectId] = React.useState(null);
   const [uploadError, setUploadError] = React.useState("");
   const [isProcessingTrack, setIsProcessingTrack] = React.useState(false);
+  const [accountName, setAccountName] = React.useState("");
+  const [accountEmail, setAccountEmail] = React.useState("");
+  const [accountError, setAccountError] = React.useState("");
   const fileInputRef = React.useRef(null);
+  const [user, setUser] = React.useState(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const stored = window.localStorage.getItem(USER_STORAGE_KEY);
+      if (!stored) return null;
+      const parsed = JSON.parse(stored);
+      if (!parsed || typeof parsed !== "object") return null;
+      if (!parsed.email || !parsed.name) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  });
 
   const [projects, setProjects] = React.useState(() => {
     if (typeof window === "undefined") return [];
@@ -217,6 +230,15 @@ export default function App() {
     window.localStorage.setItem(STORAGE_KEY, serialised);
   }, [projects]);
 
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (user) {
+      window.localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
+    } else {
+      window.localStorage.removeItem(USER_STORAGE_KEY);
+    }
+  }, [user]);
+
   const selectedProject = React.useMemo(
     () => projects.find((project) => project.id === selectedProjectId) || null,
     [projects, selectedProjectId]
@@ -235,7 +257,7 @@ export default function App() {
       id: generateId(),
       name,
       createdAt: new Date().toISOString(),
-      owner: OWNER_NAME,
+      owner: user?.name || DEFAULT_OWNER_NAME,
       coverGradient: GRADIENTS[projects.length % GRADIENTS.length],
       tracks: [],
     };
@@ -355,6 +377,96 @@ export default function App() {
     );
   };
 
+  const handleAccountSubmit = (event) => {
+    event.preventDefault();
+    const trimmedName = accountName.trim();
+    const trimmedEmail = accountEmail.trim().toLowerCase();
+    if (!trimmedName) {
+      setAccountError("Add your name to continue.");
+      return;
+    }
+    const isValidEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
+    if (!isValidEmail) {
+      setAccountError("Enter a valid email address.");
+      return;
+    }
+    if (
+      !trimmedEmail.endsWith("@gmail.com") &&
+      !trimmedEmail.endsWith("@googlemail.com")
+    ) {
+      setAccountError("Use a Google (Gmail) email address to create an account.");
+      return;
+    }
+    setUser({
+      id: generateId(),
+      name: trimmedName,
+      email: trimmedEmail,
+    });
+    setAccountName("");
+    setAccountEmail("");
+    setAccountError("");
+  };
+
+  const handleSignOut = () => {
+    setUser(null);
+    setCurrentView(VIEWS.projects);
+    setSelectedProjectId(null);
+    setUploadError("");
+    setIsProcessingTrack(false);
+  };
+
+  if (!user) {
+    return (
+      <div className="app">
+        <header className="top-bar">
+          <div className="brand">
+            <span className="brand__title">[untitled]</span>
+          </div>
+        </header>
+        <main className="app-content">
+          <section className="account-view">
+            <div className="account-panel">
+              <p className="account-eyebrow">Welcome</p>
+              <h1>Create your account</h1>
+              <p className="account-copy">
+                Use your Google email to keep your mixtapes synced on this device.
+              </p>
+              <form className="account-form" onSubmit={handleAccountSubmit}>
+                <label className="account-field">
+                  <span>Name</span>
+                  <input
+                    type="text"
+                    value={accountName}
+                    onChange={(event) => setAccountName(event.target.value)}
+                    placeholder="Taylor Creator"
+                    autoComplete="name"
+                  />
+                </label>
+                <label className="account-field">
+                  <span>Google email</span>
+                  <input
+                    type="email"
+                    value={accountEmail}
+                    onChange={(event) => setAccountEmail(event.target.value)}
+                    placeholder="taylor.creator@gmail.com"
+                    autoComplete="email"
+                  />
+                </label>
+                {accountError && <p className="status error">{accountError}</p>}
+                <button type="submit" className="account-submit">
+                  Create account
+                </button>
+              </form>
+              <p className="account-hint">
+                Tip: use the Gmail address tied to your Google account. You can switch later.
+              </p>
+            </div>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <header className="top-bar">
@@ -365,12 +477,19 @@ export default function App() {
           <IconButton label="Notifications">
             <BellIcon />
           </IconButton>
-          <IconButton label="Profile">
-            <UserIcon />
-          </IconButton>
           <IconButton label="Search">
             <SearchIcon />
           </IconButton>
+          <div className="user-chip">
+            <span className="user-chip__avatar">{getInitials(user.name)}</span>
+            <div className="user-chip__info">
+              <span className="user-chip__name">{user.name}</span>
+              <span className="user-chip__email">{user.email}</span>
+            </div>
+            <button type="button" className="user-chip__action" onClick={handleSignOut}>
+              Sign out
+            </button>
+          </div>
         </div>
       </header>
 
